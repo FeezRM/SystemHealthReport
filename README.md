@@ -38,9 +38,3 @@ To use the script in a Windows environment, open a PowerShell prompt (Administra
 ## Dashboard Output
 
 The output will be an interactive HTML dashboard containing your System Health, Logical Disks, Installed Software, and Running Services directly viewable in your preferred web browser.
-
-## Stuff Incase
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-```
