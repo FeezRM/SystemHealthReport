@@ -32,11 +32,13 @@ begin {
         if (-not (Get-Module -ListAvailable -Name $module)) {
             if ($InstallPrerequisites) {
                 Write-Host "Installing missing module: $module" -ForegroundColor Yellow
-                Install-Module -Name $module -Force -Scope CurrentUser -AllowClobber
-            } else {
+                Install-Module -Name $module -Force -Scope CurrentUser -AllowClobber -Confirm:$false
+            }
+            else {
                 Write-Warning "Required module '$module' is missing. The script will try to output basic objects, but report generation will fail. Run with -InstallPrerequisites to install."
             }
-        } else {
+        }
+        else {
             Import-Module $module
         }
     }
@@ -46,12 +48,21 @@ begin {
         param([string]$ComputerName)
         try {
             # WMI method (requires admin rights, hardware dependent)
-            $tempObj = Get-WmiObject -Query "SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature" -Namespace "root/wmi" -ComputerName $ComputerName -ErrorAction Stop
+            $isLocal = ($ComputerName -eq $env:COMPUTERNAME -or $ComputerName -eq "localhost" -or $ComputerName -eq ".")
+            
+            if ($isLocal) {
+                $tempObj = Get-WmiObject -Query "SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature" -Namespace "root/wmi" -ErrorAction Stop
+            }
+            else {
+                $tempObj = Get-WmiObject -Query "SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature" -Namespace "root/wmi" -ComputerName $ComputerName -ErrorAction Stop
+            }
+            
             if ($tempObj) {
                 $tempC = ($tempObj.CurrentTemperature / 10) - 273.15
                 return [math]::Round($tempC, 2)
             }
-        } catch {
+        }
+        catch {
             return "N/A (Access Denied / Not Supported)"
         }
         return "N/A"
@@ -61,7 +72,15 @@ begin {
     function Get-DiskSpace {
         param([string]$ComputerName)
         try {
-            $disks = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=3" -ComputerName $ComputerName -ErrorAction Stop
+            $isLocal = ($ComputerName -eq $env:COMPUTERNAME -or $ComputerName -eq "localhost" -or $ComputerName -eq ".")
+            
+            if ($isLocal) {
+                $disks = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction Stop
+            }
+            else {
+                $disks = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=3" -ComputerName $ComputerName -ErrorAction Stop
+            }
+            
             $diskInfo = foreach ($disk in $disks) {
                 $totalGB = [math]::Round($disk.Size / 1GB, 2)
                 $freeGB = [math]::Round($disk.FreeSpace / 1GB, 2)
@@ -77,7 +96,8 @@ begin {
                 }
             }
             return $diskInfo
-        } catch {
+        }
+        catch {
             Write-Warning "Failed to get disk space for $ComputerName : $_"
         }
     }
@@ -121,22 +141,26 @@ begin {
                 return $installed | Sort-Object Name -Unique
             }
             
-            if ($ComputerName -eq $env:COMPUTERNAME -or $ComputerName -eq "localhost") {
-                $result = Invoke-Command -ScriptBlock $scriptBlock
-            } else {
+            $isLocal = ($ComputerName -eq $env:COMPUTERNAME -or $ComputerName -eq "localhost" -or $ComputerName -eq ".")
+            
+            if ($isLocal) {
+                $result = & $scriptBlock
+            }
+            else {
                 $result = Invoke-Command -ComputerName $ComputerName -ScriptBlock $scriptBlock -ErrorAction Stop
             }
             
             foreach ($item in $result) {
                 $softwareList.Add([PSCustomObject]@{
-                    ComputerName = $ComputerName
-                    Name         = $item.Name
-                    Version      = $item.Version
-                    Publisher    = $item.Publisher
-                })
+                        ComputerName = $ComputerName
+                        Name         = $item.Name
+                        Version      = $item.Version
+                        Publisher    = $item.Publisher
+                    })
             }
             return $softwareList
-        } catch {
+        }
+        catch {
             Write-Warning "Failed to get software for $ComputerName : $_"
         }
     }
@@ -144,19 +168,31 @@ begin {
     # Helper function to get Running Services
     function Get-RunningServices {
         param([string]$ComputerName)
+        
         try {
-            $services = Get-Service -ComputerName $ComputerName -ErrorAction Stop | Where-Object Status -eq 'Running'
+            $isLocal = ($ComputerName -eq $env:COMPUTERNAME -or $ComputerName -eq "localhost" -or $ComputerName -eq ".")
+            
+            # Use CIM instead of Get-Service to avoid access denied errors on individual services
+            if ($isLocal) {
+                $services = Get-CimInstance -ClassName Win32_Service -Filter "State='Running'" -ErrorAction SilentlyContinue
+            }
+            else {
+                $services = Get-CimInstance -ClassName Win32_Service -Filter "State='Running'" -ComputerName $ComputerName -ErrorAction SilentlyContinue
+            }
+            
             $serviceInfo = foreach ($service in $services) {
                 [PSCustomObject]@{
                     ComputerName = $ComputerName
                     Name         = $service.Name
                     DisplayName  = $service.DisplayName
-                    Status       = $service.Status
+                    Status       = 'Running'
                 }
             }
             return $serviceInfo
-        } catch {
+        }
+        catch {
             Write-Warning "Failed to get services for $ComputerName : $_"
+            return $null
         }
     }
 
@@ -181,11 +217,19 @@ process {
         
         # 2. Disk Space
         $disks = Get-DiskSpace -ComputerName $comp
-        if ($disks) { $allDiskData.AddRange($disks) }
+        if ($disks) { foreach ($disk in $disks) { $allDiskData.Add($disk) } }
 
         # OS Info via CIM
-        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ComputerName $comp -ErrorAction SilentlyContinue
-        $compSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ComputerName $comp -ErrorAction SilentlyContinue
+        $isLocal = ($comp -eq $env:COMPUTERNAME -or $comp -eq "localhost" -or $comp -eq ".")
+        
+        if ($isLocal) {
+            $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue
+            $compSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue
+        }
+        else {
+            $os = Get-CimInstance -ClassName Win32_OperatingSystem -ComputerName $comp -ErrorAction SilentlyContinue
+            $compSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ComputerName $comp -ErrorAction SilentlyContinue
+        }
 
         $healthObj = [PSCustomObject]@{
             ComputerName   = $comp
@@ -200,11 +244,11 @@ process {
 
         # 3. Installed Software
         $software = Get-InstalledSoftware -ComputerName $comp
-        if ($software) { $allSoftwareData.AddRange($software) }
+        if ($software) { foreach ($app in $software) { $allSoftwareData.Add($app) } }
 
         # 4. Running Services
         $services = Get-RunningServices -ComputerName $comp
-        if ($services) { $allServiceData.AddRange($services) }
+        if ($services) { foreach ($service in $services) { $allServiceData.Add($service) } }
     }
 }
 
@@ -214,11 +258,11 @@ end {
     if (Get-Module -Name PSWriteHTML) {
         # Generate elegant HTML Report
         New-HTML -TitleText "System Health & Inventory Report" -FilePath $OutputPath {
-            New-HTMLTabStyle -ColorizeTab
+            New-HTMLTabStyle -SlimTabs
             
             New-HTMLTab -Name "Overview Dashboard" {
                 New-HTMLSection -HeaderText "System Health Summary" {
-                    New-HTMLTable -DataTable $allHealthData -DisableSearch -DisablePagination
+                    New-HTMLTable -DataTable $allHealthData -DisableSearch
                 }
             }
 
@@ -245,12 +289,13 @@ end {
         } -ShowHTML
         
         Write-Host "Report saved to: $OutputPath" -ForegroundColor Green
-    } else {
+    }
+    else {
         # Fallback if PSWriteHTML is not available
         Write-Warning "PSWriteHTML not found. Outputting raw data to console."
         $summary = @{
             HealthSummary = $allHealthData
-            Disks = $allDiskData
+            Disks         = $allDiskData
             SoftwareCount = $allSoftwareData.Count
             ServicesCount = $allServiceData.Count
         }
